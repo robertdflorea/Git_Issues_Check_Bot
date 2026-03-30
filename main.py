@@ -5,6 +5,7 @@ Finds valid closed GitHub issues with base SHA for AI coding tasks.
 
 import json
 import os
+from dotenv import load_dotenv
 import re
 import threading
 import time
@@ -23,6 +24,10 @@ GITHUB_API      = "https://api.github.com"
 VALID_LANGUAGES = ["Python", "JavaScript", "TypeScript"]
 TEST_INDICATORS = ["test", "tests", "spec", "specs", "__tests__", "pytest.ini", "jest.config"]
 CONFIG_PATH     = os.path.join(os.path.expanduser("~"), ".issue_finder.json")
+
+# Load .env from the same folder as the exe / script
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(_env_path)
 
 DEFAULT_REQUIREMENTS = """\
 • Language must be Python, JavaScript, or TypeScript
@@ -499,8 +504,9 @@ class App(ctk.CTk):
     # ── Token persistence ──────────────────────────────────────────────────────
 
     def _load_saved_token(self):
-        cfg = load_config()
-        token = cfg.get("token", "")
+        # Priority: 1) saved config  2) .env file  3) empty
+        cfg   = load_config()
+        token = cfg.get("token", "") or os.getenv("GITHUB_TOKEN", "")
         if token:
             self.token_entry.insert(0, token)
 
