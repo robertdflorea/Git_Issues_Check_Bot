@@ -24,8 +24,6 @@ VALID_LANGUAGES = ["Python", "JavaScript", "TypeScript"]
 TEST_INDICATORS = ["test", "tests", "spec", "specs", "__tests__", "pytest.ini", "jest.config"]
 CONFIG_PATH     = os.path.join(os.path.expanduser("~"), ".issue_finder.json")
 
-DEFAULT_TOKEN = "REMOVED"
-
 DEFAULT_REQUIREMENTS = """\
 • Language must be Python, JavaScript, or TypeScript
 • Repository size must be ≤ 200 MB
@@ -502,8 +500,9 @@ class App(ctk.CTk):
 
     def _load_saved_token(self):
         cfg = load_config()
-        token = cfg.get("token", "") or DEFAULT_TOKEN
-        self.token_entry.insert(0, token)
+        token = cfg.get("token", "")
+        if token:
+            self.token_entry.insert(0, token)
 
     def _save_token(self):
         save_config({"token": self.token_entry.get().strip()})
