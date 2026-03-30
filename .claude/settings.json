@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import main; print\\(''Import OK''\\)\")",
+      "Bash(\"C:/Users/PIStar/AppData/Roaming/Python/Python314/Scripts/pyinstaller.exe\" --onefile --name issue_finder --console main.py)",
+      "Bash(python -c \"import customtkinter; print\\(customtkinter.__version__\\)\")",
+      "Bash(rm -rf build dist issue_finder.spec)",
+      "Bash(C:/Users/PIStar/AppData/Roaming/Python/Python314/Scripts/pyinstaller.exe --onefile --windowed --name issue_finder main.py)",
+      "Bash(python -c \"import main; print\\(''OK''\\)\")",
+      "Bash(python -c \"import main; print\\(''''OK''''\\)\")"
+    ]
+  }
+}
