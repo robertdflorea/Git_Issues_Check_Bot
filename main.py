@@ -239,19 +239,21 @@ def fetch_closed_issues(headers, repo_full, stop_event=None):
 
 
 def fetch_pr_files(headers, repo_full, pr_number, stop_event=None):
-    """Return (file_paths, total_changed_lines) for a PR (up to 100 files)."""
+    """Return (file_paths, total_changed_lines, lines_per_file) for a PR (up to 100 files).
+    lines_per_file is a dict {filename: lines_changed}."""
     r = api_get(f"{GITHUB_API}/repos/{repo_full}/pulls/{pr_number}/files",
                 headers, {"per_page": 100}, stop_event=stop_event)
     if not r or r.status_code != 200:
-        return [], 0
+        return [], 0, {}
     files = r.json()
-    paths = [f["filename"] for f in files]
-    lines = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
-    return paths, lines
+    paths          = [f["filename"] for f in files]
+    lines_per_file = {f["filename"]: f.get("additions", 0) + f.get("deletions", 0) for f in files}
+    total_lines    = sum(lines_per_file.values())
+    return paths, total_lines, lines_per_file
 
 
 def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
-    """Returns (pr_url, base_sha, changed_files_count, changed_file_list, changed_lines)."""
+    """Returns (pr_url, base_sha, changed_files_count, changed_file_list, changed_lines, lines_per_file)."""
     t_headers = {**headers, "Accept": "application/vnd.github.mockingbird-preview+json"}
     t_resp = api_get(f"{GITHUB_API}/repos/{repo_full}/issues/{issue_number}/timeline",
                      t_headers, stop_event=stop_event)
@@ -266,7 +268,7 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
                         pr_numbers.append(num)
     if not pr_numbers:
         if stop_event and stop_event.is_set():
-            return None, None, 0, [], 0
+            return None, None, 0, [], 0, {}
         q = f"repo:{repo_full} is:pr is:closed {issue_number}"
         sr = api_get(f"{GITHUB_API}/search/issues", headers,
                      {"q": q, "per_page": 10}, stop_event=stop_event)
@@ -280,7 +282,7 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
     seen = set()
     for num in pr_numbers:
         if stop_event and stop_event.is_set():
-            return None, None, 0, [], 0
+            return None, None, 0, [], 0, {}
         if num in seen:
             continue
         seen.add(num)
@@ -291,9 +293,10 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
             sha = pr.get("base", {}).get("sha", "")
             if sha:
                 changed_count = pr.get("changed_files", 0)
-                file_list, changed_lines = fetch_pr_files(headers, repo_full, num, stop_event)
-                return pr.get("html_url", ""), sha, changed_count, file_list, changed_lines
-    return None, None, 0, [], 0
+                file_list, changed_lines, lines_per_file = fetch_pr_files(
+                    headers, repo_full, num, stop_event)
+                return pr.get("html_url", ""), sha, changed_count, file_list, changed_lines, lines_per_file
+    return None, None, 0, [], 0, {}
 
 
 def check_issue_nontrivial(issue, checks):
@@ -348,10 +351,10 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
 
     issue_ok = all(ok for _, ok in issue_checks)
 
-    pr_url, base_sha, changed_files, changed_file_list, changed_lines = None, None, 0, [], 0
+    pr_url, base_sha, changed_files, changed_file_list, changed_lines, lines_per_file = None, None, 0, [], 0, {}
     if issue_ok:
         log_cb("info", "  → Looking for linked PR…")
-        pr_url, base_sha, changed_files, changed_file_list, changed_lines = find_linked_pr(
+        pr_url, base_sha, changed_files, changed_file_list, changed_lines, lines_per_file = find_linked_pr(
             headers, repo_full, num, stop_event)
         pr_ok = bool(base_sha)
         issue_checks.append(("Linked PR with base SHA", pr_ok))
@@ -382,10 +385,16 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
                 issue_ok = has_non_test_code
 
         if issue_ok:
-            enough_lines = changed_lines > 20
-            issue_checks.append((f"Meaningful lines changed > 20 (found {changed_lines})", enough_lines))
-            log_cb("check", (f"Meaningful lines changed > 20 (found {changed_lines})", enough_lines))
-            issue_ok = enough_lines
+            CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx"}
+            code_lines = sum(
+                lines for fname, lines in lines_per_file.items()
+                if os.path.splitext(fname)[1].lower() in CODE_EXTS
+            )
+            lines_ok = 30 <= code_lines <= 200
+            issue_checks.append((
+                f"Code file lines changed 30–200 (found {code_lines})", lines_ok))
+            log_cb("check", (f"Code file lines changed 30–200 (found {code_lines})", lines_ok))
+            issue_ok = lines_ok
     else:
         # still record the PR check as skipped / not checked
         issue_checks.append(("Linked PR with base SHA", False))
@@ -404,7 +413,10 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
             "base_sha":      base_sha,
             "changed_files":      changed_files,
             "changed_file_list":  changed_file_list,
-            "changed_lines":      changed_lines,
+            "changed_lines":      sum(
+                l for f, l in lines_per_file.items()
+                if os.path.splitext(f)[1].lower() in {".py", ".js", ".ts", ".tsx", ".jsx"}
+            ),
             "dockerfile":         contents.get("dockerfile", False),
             "checks":        issue_checks,
         }
