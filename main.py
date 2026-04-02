@@ -5,6 +5,7 @@ Finds valid closed GitHub issues with base SHA for AI coding tasks.
 
 import json
 import os
+import sys
 from dotenv import load_dotenv
 import re
 import threading
@@ -25,8 +26,11 @@ VALID_LANGUAGES = ["Python", "JavaScript", "TypeScript"]
 TEST_INDICATORS = ["test", "tests", "spec", "specs", "__tests__", "pytest.ini", "jest.config"]
 CONFIG_PATH     = os.path.join(os.path.expanduser("~"), ".issue_finder.json")
 
-# Load .env from the same folder as the exe / script
-_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# Load .env — check PyInstaller bundle first, then script directory
+_base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+_env_path = os.path.join(_base, ".env")
+if not os.path.exists(_env_path):
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(_env_path)
 
 DEFAULT_REQUIREMENTS = """\
