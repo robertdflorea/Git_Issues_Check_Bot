@@ -5,6 +5,7 @@ Finds valid closed GitHub issues with base SHA for AI coding tasks.
 
 import json
 import os
+import queue as queue_module
 import sys
 from dotenv import load_dotenv
 import re
@@ -670,7 +671,48 @@ class App(ctk.CTk):
         self.repo_entry = ctk.CTkEntry(
             self.left, placeholder_text="https://github.com/owner/repo",
             height=36, font=ctk.CTkFont(*FONT_BODY))
-        self.repo_entry.pack(padx=18, pady=(4, 14), fill="x")
+        self.repo_entry.pack(padx=18, pady=(4, 6), fill="x")
+        self.repo_entry.bind("<Return>", lambda e: self._add_to_queue())
+
+        self.add_url_btn = ctk.CTkButton(
+            self.left, text="＋  Add to Queue", height=34,
+            fg_color="#2471a3", hover_color="#1a5276",
+            font=ctk.CTkFont(*FONT_BODY), command=self._add_to_queue)
+        self.add_url_btn.pack(padx=18, pady=(0, 6), fill="x")
+
+        # Queue list
+        self._queue_frame = ctk.CTkFrame(self.left, fg_color=T["BG_MID"], corner_radius=6)
+        self._queue_frame.pack(padx=18, pady=(0, 10), fill="x")
+
+        _queue_header = tk.Frame(self._queue_frame, bg=T["BG_MID"])
+        _queue_header.pack(fill="x", padx=8, pady=(6, 2))
+        self._queue_count_lbl = tk.Label(
+            _queue_header, text="Queue: 0 URL(s)",
+            bg=T["BG_MID"], fg=T["FG_DIM"], font=FONT_SMALL)
+        self._queue_count_lbl.pack(side="left")
+        tk.Button(
+            _queue_header, text="Clear All", relief="flat",
+            bg=T["BG_MID"], fg="#e74c3c", activebackground=T["BG_MID"],
+            activeforeground="#c0392b", font=FONT_SMALL, cursor="hand2",
+            command=self._clear_queue).pack(side="right")
+
+        self._queue_listbox = tk.Listbox(
+            self._queue_frame, height=5,
+            bg=T["BG_LOG"], fg=T["FG"], selectbackground=T["SEL_BG"],
+            font=FONT_SMALL, relief="flat", bd=0,
+            activestyle="none", highlightthickness=0)
+        self._queue_listbox.pack(fill="x", padx=6, pady=(2, 4))
+
+        _rm_btn = tk.Button(
+            self._queue_frame, text="✕  Remove Selected", relief="flat",
+            bg=T["BG_MID"], fg=T["FG_DIM"], activebackground=T["BG_MID"],
+            activeforeground="#e74c3c", font=FONT_SMALL, cursor="hand2",
+            command=self._remove_selected_url)
+        _rm_btn.pack(pady=(0, 6))
+
+        self._repo_queue    = []                    # display list (listbox)
+        self._work_queue    = queue_module.Queue()  # live job queue for workers
+        self._search_running = False
 
         # Token
         slabel("GitHub Token  (optional)")
@@ -1342,29 +1384,78 @@ class App(ctk.CTk):
             text=f"({i} valid issue{'s' if i != 1 else ''} found)", text_color=PASS_COL)
         self.export_btn.configure(state="normal")
 
+    # ── Queue management ───────────────────────────────────────────────────────
+
+    def _add_to_queue(self):
+        raw = self.repo_entry.get().strip()
+        if not raw:
+            return
+        if parse_input_url(raw) is None:
+            messagebox.showerror("Invalid URL",
+                                 "Please enter a valid GitHub repository or issue URL.")
+            return
+        if raw in self._repo_queue:
+            messagebox.showinfo("Duplicate", "This URL is already in the queue.")
+            return
+        self._repo_queue.append(raw)
+        self._queue_listbox.insert("end", raw)
+        self._queue_count_lbl.configure(text=f"Queue: {len(self._repo_queue)} URL(s)")
+        self.repo_entry.delete(0, "end")
+        # If search is already running, feed the URL directly to the worker pool
+        if self._search_running:
+            self._work_queue.put(raw)
+
+    def _remove_selected_url(self):
+        sel = self._queue_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self._queue_listbox.delete(idx)
+        del self._repo_queue[idx]
+        self._queue_count_lbl.configure(text=f"Queue: {len(self._repo_queue)} URL(s)")
+
+    def _clear_queue(self):
+        self._repo_queue.clear()
+        self._queue_listbox.delete(0, "end")
+        self._queue_count_lbl.configure(text="Queue: 0 URL(s)")
+
     # ── Actions ────────────────────────────────────────────────────────────────
 
     def _start_search(self):
-        raw = self.repo_entry.get().strip()
-        parsed = parse_input_url(raw)
-        if not parsed:
-            messagebox.showerror("Invalid URL",
-                                 "Please enter a valid GitHub repository or issue URL.\n"
-                                 "Repo:  https://github.com/owner/repo\n"
-                                 "Issue: https://github.com/owner/repo/issues/123")
+        # Collect URLs: queue + anything typed in the entry field
+        urls = list(self._repo_queue)
+        raw  = self.repo_entry.get().strip()
+        if raw and raw not in urls:
+            if parse_input_url(raw) is None:
+                messagebox.showerror("Invalid URL",
+                                     "Please enter a valid GitHub repository or issue URL.\n"
+                                     "Repo:  https://github.com/owner/repo\n"
+                                     "Issue: https://github.com/owner/repo/issues/123")
+                return
+            urls.append(raw)
+            self._repo_queue.append(raw)
+            self._queue_listbox.insert("end", raw)
+            self._queue_count_lbl.configure(text=f"Queue: {len(self._repo_queue)} URL(s)")
+            self.repo_entry.delete(0, "end")
+
+        if not urls:
+            messagebox.showerror("No URLs",
+                                 "Add at least one URL to the queue or enter one in the field.")
             return
 
         token    = self.token_entry.get().strip() or None
         req_text = self.req_box.get("1.0", "end")
-
-        # Save token
         self._save_token()
 
-        input_type   = parsed[0]
-        repo_full    = parsed[1]
-        issue_number = parsed[2] if input_type == "issue" else None
+        # Reset work queue and fill with initial URLs
+        while not self._work_queue.empty():
+            try: self._work_queue.get_nowait()
+            except queue_module.Empty: break
+        for url in urls:
+            self._work_queue.put(url)
 
         self._stop_event.clear()
+        self._search_running = True
         self.results = []
         self._issue_count = 0
         self.search_btn.configure(state="disabled")
@@ -1373,18 +1464,59 @@ class App(ctk.CTk):
         self._clear_table()
         self._clear_log()
         self.stat_lbl.configure(text="")
-        label = f"Issue #{issue_number}" if input_type == "issue" else repo_full
-        self.spinner.start(f"Searching {label}…")
         self._progress.start()
+        self.spinner.start(f"Starting {len(urls)} URL(s)…")
 
-        def run():
+        MAX_WORKERS  = 3
+        semaphore    = threading.Semaphore(MAX_WORKERS)
+        active_lock  = threading.Lock()
+        active_count = [0]
+
+        def worker(url):
+            parsed       = parse_input_url(url)
+            input_type   = parsed[0]
+            repo_full    = parsed[1]
+            issue_number = parsed[2] if input_type == "issue" else None
+            label = f"Issue #{issue_number}" if input_type == "issue" else repo_full
+            self.after(0, lambda l=label: self.spinner.set_text(f"Checking {l}…"))
             run_search(token, input_type, repo_full, issue_number, req_text,
                        log_cb=self._log_cb,
                        add_result_cb=self._add_result_cb,
-                       done_cb=lambda: self.after(0, self._on_done),
+                       done_cb=lambda: None,
                        stop_event=self._stop_event)
+            semaphore.release()
+            with active_lock:
+                active_count[0] -= 1
 
-        threading.Thread(target=run, daemon=True).start()
+        def coordinator():
+            idle_since = None
+            while not self._stop_event.is_set():
+                try:
+                    url = self._work_queue.get(timeout=0.5)
+                    idle_since = None
+                except queue_module.Empty:
+                    with active_lock:
+                        truly_idle = active_count[0] == 0
+                    if truly_idle:
+                        if idle_since is None:
+                            idle_since = time.time()
+                            self.after(0, lambda: self.spinner.set_text(
+                                "Idle — add more URLs or click Stop"))
+                        elif time.time() - idle_since >= 5:
+                            break  # auto-stop after 5 s with no work
+                    continue
+                semaphore.acquire()
+                with active_lock:
+                    active_count[0] += 1
+                threading.Thread(target=worker, args=(url,), daemon=True).start()
+
+            # Wait for all in-flight workers to finish
+            for _ in range(MAX_WORKERS):
+                semaphore.acquire()
+            self._search_running = False
+            self.after(0, self._on_done)
+
+        threading.Thread(target=coordinator, daemon=True).start()
 
     def _stop_search(self):
         self._stop_event.set()
@@ -1392,6 +1524,7 @@ class App(ctk.CTk):
         self.spinner.set_text("Stopping…")
 
     def _on_done(self):
+        self._search_running = False
         self._progress.stop()
         self._progress.set(0)
         self.search_btn.configure(state="normal")
