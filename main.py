@@ -45,10 +45,47 @@ PASS_COL = "#2ecc71"
 FAIL_COL = "#e74c3c"
 INFO_COL = "#3498db"
 WARN_COL = "#f39c12"
-BG_DARK  = "#12181f"
-BG_MID   = "#1a2535"
-BG_LEFT  = "#0f151c"
-BG_LOG   = "#0d1117"
+
+DARK_THEME = {
+    "BG_DARK":    "#12181f",
+    "BG_MID":     "#1a2535",
+    "BG_LEFT":    "#0f151c",
+    "BG_LOG":     "#0d1117",
+    "BG_EVEN":    "#1e2d40",
+    "BG_CHECKED": "#1a3a1a",
+    "FG":         "white",
+    "FG_DIM":     "gray",
+    "HDR_BG":     "#1F4E79",
+    "HDR_FG":     "white",
+    "SEL_BG":     "#2980b9",
+    "LINE_COL":   "#2c3e50",
+}
+
+LIGHT_THEME = {
+    "BG_DARK":    "#f0f4f8",
+    "BG_MID":     "#e2e8f0",
+    "BG_LEFT":    "#dde3ea",
+    "BG_LOG":     "#f8fafc",
+    "BG_EVEN":    "#cbd5e1",
+    "BG_CHECKED": "#bbf7d0",
+    "FG":         "#1a202c",
+    "FG_DIM":     "#64748b",
+    "HDR_BG":     "#1e40af",
+    "HDR_FG":     "white",
+    "SEL_BG":     "#3b82f6",
+    "LINE_COL":   "#94a3b8",
+}
+
+# Active theme (mutable dict, updated on toggle)
+T = dict(DARK_THEME)
+
+# Convenience aliases kept for code that references bare names
+def _t(key): return T[key]
+
+BG_DARK  = T["BG_DARK"]
+BG_MID   = T["BG_MID"]
+BG_LEFT  = T["BG_LEFT"]
+BG_LOG   = T["BG_LOG"]
 
 FONT_BODY  = ("Segoe UI", 12)
 FONT_BOLD  = ("Segoe UI", 12, "bold")
@@ -196,8 +233,20 @@ def fetch_closed_issues(headers, repo_full, stop_event=None):
     return issues
 
 
+def fetch_pr_files(headers, repo_full, pr_number, stop_event=None):
+    """Return (file_paths, total_changed_lines) for a PR (up to 100 files)."""
+    r = api_get(f"{GITHUB_API}/repos/{repo_full}/pulls/{pr_number}/files",
+                headers, {"per_page": 100}, stop_event=stop_event)
+    if not r or r.status_code != 200:
+        return [], 0
+    files = r.json()
+    paths = [f["filename"] for f in files]
+    lines = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+    return paths, lines
+
+
 def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
-    """Returns (pr_url, base_sha, changed_files)."""
+    """Returns (pr_url, base_sha, changed_files_count, changed_file_list, changed_lines)."""
     t_headers = {**headers, "Accept": "application/vnd.github.mockingbird-preview+json"}
     t_resp = api_get(f"{GITHUB_API}/repos/{repo_full}/issues/{issue_number}/timeline",
                      t_headers, stop_event=stop_event)
@@ -212,7 +261,7 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
                         pr_numbers.append(num)
     if not pr_numbers:
         if stop_event and stop_event.is_set():
-            return None, None, 0
+            return None, None, 0, [], 0
         q = f"repo:{repo_full} is:pr is:closed {issue_number}"
         sr = api_get(f"{GITHUB_API}/search/issues", headers,
                      {"q": q, "per_page": 10}, stop_event=stop_event)
@@ -226,7 +275,7 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
     seen = set()
     for num in pr_numbers:
         if stop_event and stop_event.is_set():
-            return None, None, 0
+            return None, None, 0, [], 0
         if num in seen:
             continue
         seen.add(num)
@@ -236,9 +285,10 @@ def find_linked_pr(headers, repo_full, issue_number, stop_event=None):
             pr = pr_r.json()
             sha = pr.get("base", {}).get("sha", "")
             if sha:
-                changed = pr.get("changed_files", 0)
-                return pr.get("html_url", ""), sha, changed
-    return None, None, 0
+                changed_count = pr.get("changed_files", 0)
+                file_list, changed_lines = fetch_pr_files(headers, repo_full, num, stop_event)
+                return pr.get("html_url", ""), sha, changed_count, file_list, changed_lines
+    return None, None, 0, [], 0
 
 
 def check_issue_nontrivial(issue, checks):
@@ -247,7 +297,13 @@ def check_issue_nontrivial(issue, checks):
     body     = issue.get("body") or ""
     comments = issue.get("comments", 0)
     if checks["trivial_title"]:
-        trivial_kw = ["typo", "rename", "spelling", "grammar", "bump version", "update readme"]
+        trivial_kw = [
+            "typo", "rename", "spelling", "grammar", "bump version", "update readme",
+            "update changelog", "update docs", "update documentation", "fix typo",
+            "fix spelling", "fix grammar", "css only", "css fix", "doc only",
+            "docs only", "documentation only", "move file", "move files",
+            "clean up", "cleanup", "formatting", "whitespace", "lint fix",
+        ]
         results.append(("Title not trivial", not any(kw in title for kw in trivial_kw)))
     if checks["nontrivial"]:
         results.append(("Body length ≥ 50 chars", len(body) >= 50))
@@ -287,15 +343,44 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
 
     issue_ok = all(ok for _, ok in issue_checks)
 
-    pr_url, base_sha, changed_files = None, None, 0
+    pr_url, base_sha, changed_files, changed_file_list, changed_lines = None, None, 0, [], 0
     if issue_ok:
         log_cb("info", "  → Looking for linked PR…")
-        pr_url, base_sha, changed_files = find_linked_pr(
+        pr_url, base_sha, changed_files, changed_file_list, changed_lines = find_linked_pr(
             headers, repo_full, num, stop_event)
         pr_ok = bool(base_sha)
         issue_checks.append(("Linked PR with base SHA", pr_ok))
         log_cb("check", ("Linked PR with base SHA", pr_ok))
         issue_ok = pr_ok
+
+        if issue_ok:
+            CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx"}
+            code_files = [
+                f for f in changed_file_list
+                if os.path.splitext(f)[1].lower() in CODE_EXTS
+            ]
+            code_file_count = len(code_files)
+            enough_code_files = code_file_count > 2
+            issue_checks.append((f"Code files changed > 2 (found {code_file_count})", enough_code_files))
+            log_cb("check", (f"Code files changed > 2 (found {code_file_count})", enough_code_files))
+            issue_ok = enough_code_files
+
+            # Also reject pure test-only or doc-only PRs
+            if issue_ok:
+                non_test_code = [
+                    f for f in code_files
+                    if not any(ind in f.lower() for ind in TEST_INDICATORS)
+                ]
+                has_non_test_code = len(non_test_code) > 0
+                issue_checks.append(("PR touches non-test code files", has_non_test_code))
+                log_cb("check", ("PR touches non-test code files", has_non_test_code))
+                issue_ok = has_non_test_code
+
+        if issue_ok:
+            enough_lines = changed_lines > 20
+            issue_checks.append((f"Meaningful lines changed > 20 (found {changed_lines})", enough_lines))
+            log_cb("check", (f"Meaningful lines changed > 20 (found {changed_lines})", enough_lines))
+            issue_ok = enough_lines
     else:
         # still record the PR check as skipped / not checked
         issue_checks.append(("Linked PR with base SHA", False))
@@ -312,8 +397,10 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
             "issue_url":     issue["html_url"],
             "pr_url":        pr_url or "",
             "base_sha":      base_sha,
-            "changed_files": changed_files,
-            "dockerfile":    contents.get("dockerfile", False),
+            "changed_files":      changed_files,
+            "changed_file_list":  changed_file_list,
+            "changed_lines":      changed_lines,
+            "dockerfile":         contents.get("dockerfile", False),
             "checks":        issue_checks,
         }
     else:
@@ -394,6 +481,15 @@ def run_search(token, input_type, repo_full, issue_number,
 
 # ── Excel export ───────────────────────────────────────────────────────────────
 
+def _files_cell(r):
+    """Format changed files as single-line: count | lines | filenames."""
+    file_list = r.get("changed_file_list", [])
+    count     = r.get("changed_files", len(file_list))
+    lines     = r.get("changed_lines", 0)
+    names     = ", ".join(os.path.basename(f) for f in file_list) if file_list else "—"
+    return f"{count} files | {lines} lines | {names}"
+
+
 def export_to_excel(results, path):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -407,7 +503,7 @@ def export_to_excel(results, path):
 
     headers    = ["Repo Name", "Issue Link", "Issue Title", "Base SHA",
                   "Repo Category", "PR Link", "Files Changed", "Status"]
-    col_widths = [40, 55, 55, 45, 16, 55, 14, 12]
+    col_widths = [40, 55, 55, 45, 16, 55, 45, 12]
 
     for col, (h, w) in enumerate(zip(headers, col_widths), 1):
         cell = ws.cell(row=1, column=col, value=h)
@@ -421,13 +517,15 @@ def export_to_excel(results, path):
         fill = altfill if i % 2 == 0 else None
         for col, val in enumerate([
             r["repo"], r["issue_url"], r["issue_title"], r["base_sha"],
-            r["language"], r["pr_url"], r.get("changed_files", 0), "Open",
+            r["language"], r["pr_url"],
+            _files_cell(r), "Open",
         ], 1):
             cell = ws.cell(row=i+1, column=col, value=val)
             if fill: cell.fill = fill
             cell.border = bdr
-            cell.alignment = Alignment(vertical="center", wrap_text=(col in (1,2,3,4,6)))
-        ws.row_dimensions[i+1].height = 20
+            cell.alignment = Alignment(vertical="top", wrap_text=(col in (1,2,3,4,6,7)))
+        n_files = len(r.get("changed_file_list", []))
+        ws.row_dimensions[i+1].height = max(20, 15 * (n_files + 1))
 
     wb.save(path)
 
@@ -473,14 +571,14 @@ class Spinner(ctk.CTkFrame):
 
 # Treeview column definitions
 COLUMNS = [
-    ("Check",         "✓",              38,  "center"),
-    ("Repo",          "Repository",     160, "w"),
-    ("Issue URL",     "Issue Link",     220, "w"),
-    ("Title",         "Issue Title",    280, "w"),
-    ("Base SHA",      "Base SHA",       155, "w"),
-    ("Category",      "Repo Category",  110, "center"),
-    ("PR URL",        "PR Link",        200, "w"),
-    ("Changed Files", "Files Changed",  110, "center"),
+    ("Check",         "✓",              42,  "center"),
+    ("Repo",          "Repository",     200, "w"),
+    ("Issue URL",     "Issue Link",     260, "w"),
+    ("Title",         "Issue Title",    320, "w"),
+    ("Base SHA",      "Base SHA",       180, "w"),
+    ("Category",      "Repo Category",  130, "center"),
+    ("PR URL",        "PR Link",        240, "w"),
+    ("Changed Files", "Files Changed",  420, "w"),
 ]
 
 URL_COLS = {"Issue URL", "PR URL"}   # double-click opens browser
@@ -498,10 +596,23 @@ class App(ctk.CTk):
         self._sort_col   = None
         self._sort_rev   = False
         self._checked    = set()   # set of treeview item iids that are ticked
+        self._load_saved_theme()
         self._build_ui()
         self._load_saved_token()
 
-    # ── Token persistence ──────────────────────────────────────────────────────
+    # ── Theme / token persistence ──────────────────────────────────────────────
+
+    def _load_saved_theme(self):
+        cfg   = load_config()
+        theme = cfg.get("theme", "dark")
+        if theme == "light":
+            T.update(LIGHT_THEME)
+            ctk.set_appearance_mode("light")
+        else:
+            T.update(DARK_THEME)
+            ctk.set_appearance_mode("dark")
+
+    # ──────────────────────────────────────────────────────────────────────────
 
     def _load_saved_token(self):
         # Priority: 1) saved config  2) .env file  3) empty
@@ -525,7 +636,7 @@ class App(ctk.CTk):
         self._h_pane.pack(fill="both", expand=True)
 
         # ── LEFT ──────────────────────────────────────────────────────────
-        _left_host = tk.Frame(self._h_pane, bg=BG_LEFT)
+        _left_host = tk.Frame(self._h_pane, bg=T["BG_LEFT"])
         self._h_pane.add(_left_host, weight=0)
 
         self.left = ctk.CTkScrollableFrame(_left_host, fg_color=BG_LEFT, corner_radius=0)
@@ -598,6 +709,27 @@ class App(ctk.CTk):
             font=ctk.CTkFont(*FONT_BOLD), command=self._clear)
         self.clear_btn.pack(padx=18, pady=(0, 8), fill="x")
 
+        # Row height slider
+        slabel("Row Height")
+        self._row_height_var = tk.IntVar(value=30)
+        _rh_row = ctk.CTkFrame(self.left, fg_color="transparent")
+        _rh_row.pack(padx=18, pady=(2, 8), fill="x")
+        self._rh_slider = ctk.CTkSlider(
+            _rh_row, from_=22, to=120,
+            variable=self._row_height_var,
+            command=self._on_row_height_change)
+        self._rh_slider.pack(side="left", fill="x", expand=True)
+        self._rh_lbl = ctk.CTkLabel(
+            _rh_row, text="30 px", width=52,
+            font=ctk.CTkFont(*FONT_SMALL), anchor="e")
+        self._rh_lbl.pack(side="left", padx=(6, 0))
+
+        self.theme_btn = ctk.CTkButton(
+            self.left, text="☀  Switch to Light Theme", height=36,
+            fg_color="#4a5568", hover_color="#2d3748",
+            font=ctk.CTkFont(*FONT_BOLD), command=self._toggle_theme)
+        self.theme_btn.pack(padx=18, pady=(0, 8), fill="x")
+
         self.spinner = Spinner(self.left)
         self.spinner.pack(padx=18, pady=(12, 4), fill="x")
 
@@ -607,16 +739,18 @@ class App(ctk.CTk):
         self.stat_lbl.pack(padx=18, pady=(0, 18), fill="x")
 
         # ── RIGHT: vertical paned window ──────────────────────────────────
-        _right_host = tk.Frame(self._h_pane, bg=BG_DARK)
+        _right_host = tk.Frame(self._h_pane, bg=T["BG_DARK"])
         self._h_pane.add(_right_host, weight=1)
+        self._right_host = _right_host
 
         self._v_pane = ttk.PanedWindow(_right_host, orient="vertical",
                                        style="Dark.TPanedwindow")
         self._v_pane.pack(fill="both", expand=True, padx=8, pady=8)
 
         # ── Results table (top) ────────────────────────────────────────
-        _tbl_host = tk.Frame(self._v_pane, bg=BG_DARK)
+        _tbl_host = tk.Frame(self._v_pane, bg=T["BG_DARK"])
         self._v_pane.add(_tbl_host, weight=3)
+        self._tbl_host = _tbl_host
 
         tbl_wrap = ctk.CTkFrame(_tbl_host, fg_color=BG_DARK, corner_radius=0)
         tbl_wrap.pack(fill="both", expand=True)
@@ -636,15 +770,8 @@ class App(ctk.CTk):
         tree_host = ctk.CTkFrame(tbl_wrap, fg_color=BG_MID, corner_radius=7)
         tree_host.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
-        style.configure("Issue.Treeview",
-                        background=BG_MID, foreground="white",
-                        fieldbackground=BG_MID, rowheight=30, font=FONT_MONO)
-        style.configure("Issue.Treeview.Heading",
-                        background="#1F4E79", foreground="white",
-                        font=("Segoe UI", 12, "bold"), relief="flat", padding=(6, 4))
-        style.map("Issue.Treeview",
-                  background=[("selected", "#2980b9")],
-                  foreground=[("selected", "white")])
+        self._tree_style = style
+        self._apply_treeview_style()
 
         col_ids = [c[0] for c in COLUMNS]
         self.tree = ttk.Treeview(tree_host, columns=col_ids, show="headings",
@@ -652,8 +779,13 @@ class App(ctk.CTk):
 
         for col_id, col_label, col_w, col_anchor in COLUMNS:
             self.tree.column(col_id, width=col_w, anchor=col_anchor, minwidth=40)
-            self.tree.heading(col_id, text=col_label,
-                              command=lambda c=col_id: self._sort_by(c))
+            if col_id == "Check":
+                # Header click = select all / deselect all
+                self.tree.heading(col_id, text=col_label,
+                                  command=self._toggle_all_checks)
+            else:
+                self.tree.heading(col_id, text=col_label,
+                                  command=lambda c=col_id: self._sort_by(c))
 
         sy = ttk.Scrollbar(tree_host, orient="vertical",   command=self.tree.yview)
         sx = ttk.Scrollbar(tree_host, orient="horizontal", command=self.tree.xview)
@@ -661,9 +793,47 @@ class App(ctk.CTk):
         sy.pack(side="right",  fill="y")
         sx.pack(side="bottom", fill="x")
         self.tree.pack(fill="both", expand=True)
-        self.tree.tag_configure("odd",     background=BG_MID)
-        self.tree.tag_configure("even",    background="#1e2d40")
-        self.tree.tag_configure("checked", background="#1a3a1a")  # dark green tint
+        self._tree_host = tree_host   # kept for bg update on theme toggle
+        self._refresh_tree_tags()
+
+        # ── Vertical column lines on body (1-px Frame separators) ────────
+        # Use thin tk.Frame strips instead of an opaque canvas overlay so
+        # that the treeview rows remain visible and clickable.
+        self._sep_frames = []
+        n_seps = len(COLUMNS) - 1
+        for _ in range(n_seps):
+            f = tk.Frame(tree_host, bg=T["LINE_COL"], width=1, bd=0,
+                         highlightthickness=0)
+            self._sep_frames.append(f)
+
+        def _draw_vlines(event=None):
+            self.tree.update_idletasks()
+            tx   = self.tree.winfo_x()
+            ty   = self.tree.winfo_y()
+            th   = self.tree.winfo_height()
+            head_h = 30
+            try:
+                head_h = int(self.tree.tk.call(
+                    "ttk::treeview::HeaderHeight", self.tree))
+            except Exception:
+                pass
+            x = tx
+            body_top  = ty + head_h
+            body_h    = max(1, th - head_h)
+            for i, (col_id, _, _, _) in enumerate(COLUMNS[:-1]):
+                try:
+                    x += self.tree.column(col_id, "width")
+                except Exception:
+                    break
+                self._sep_frames[i].place(
+                    x=x - 1, y=body_top, width=1, height=body_h)
+                self._sep_frames[i].lift()   # keep above tree but below scrollbars
+
+        self.tree.bind("<Configure>",       _draw_vlines)
+        self.tree.bind("<B1-Motion>",       _draw_vlines)   # live column drag
+        self.tree.bind("<ButtonRelease-1>", _draw_vlines)   # after column drag release
+        self._draw_vlines = _draw_vlines
+        self.after(400, _draw_vlines)
 
         col_ids_list = [c[0] for c in COLUMNS]
 
@@ -756,9 +926,35 @@ class App(ctk.CTk):
 
         self.tree.bind("<Button-3>", _show_ctx)
 
+        # ── Cell editor (click to select/edit/copy) ────────────────────
+        self._cell_editor = None
+
+        self.tree.bind("<Double-ButtonRelease-1>", _on_double_click)  # keep URL open
+        self.tree.bind("<ButtonRelease-1>", _on_click)               # keep checkbox
+        self.tree.bind("<Control-Return>", lambda e: None)
+        # Single click (non-checkbox) opens inline editor on second click
+        self._last_clicked_cell = (None, None)
+
+        def _on_click_editor(event):
+            _on_click(event)   # still do checkbox logic
+            region = self.tree.identify_region(event.x, event.y)
+            if region != "cell":
+                return
+            col_id = _get_col_id(event)
+            iid    = self.tree.identify_row(event.y)
+            if col_id and col_id not in ("Check",) and iid:
+                if self._last_clicked_cell == (iid, col_id):
+                    self._show_cell_editor(iid, col_id)
+                self._last_clicked_cell = (iid, col_id)
+
+        # Replace the earlier ButtonRelease binding
+        self.tree.unbind("<ButtonRelease-1>")
+        self.tree.bind("<ButtonRelease-1>", _on_click_editor)
+
         # ── Live log panel (bottom) ────────────────────────────────────
-        _log_host = tk.Frame(self._v_pane, bg=BG_DARK)
+        _log_host = tk.Frame(self._v_pane, bg=T["BG_DARK"])
         self._v_pane.add(_log_host, weight=1)
+        self._log_host = _log_host
 
         log_wrap = ctk.CTkFrame(_log_host, fg_color=BG_DARK, corner_radius=0)
         log_wrap.pack(fill="both", expand=True)
@@ -794,7 +990,134 @@ class App(ctk.CTk):
         # Initial sash
         self.after(300, lambda: self._v_pane.sashpos(0, 520))
 
+        # Sync theme button label with loaded theme
+        if ctk.get_appearance_mode().lower() == "light":
+            self.theme_btn.configure(text="🌙  Switch to Dark Theme")
+        else:
+            self.theme_btn.configure(text="☀  Switch to Light Theme")
+
     # ── Sorting ────────────────────────────────────────────────────────────────
+
+    # ── Theme ──────────────────────────────────────────────────────────────────
+
+    def _apply_treeview_style(self):
+        s = self._tree_style
+        rh = getattr(self, "_row_height_var", None)
+        rh = rh.get() if rh else 30
+        s.configure("Issue.Treeview",
+                    background=T["BG_MID"], foreground=T["FG"],
+                    fieldbackground=T["BG_MID"], rowheight=rh,
+                    font=FONT_MONO, borderwidth=0)
+        s.configure("Issue.Treeview.Heading",
+                    background=T["HDR_BG"], foreground=T["HDR_FG"],
+                    font=("Segoe UI", 12, "bold"), relief="raised", padding=(6, 4))
+        s.map("Issue.Treeview",
+              background=[("selected", T["SEL_BG"])],
+              foreground=[("selected", "white")])
+        # Draw vertical lines by configuring the separator
+        s.configure("Issue.TSeparator", background=T["LINE_COL"])
+
+    def _refresh_tree_tags(self):
+        self.tree.tag_configure("odd",     background=T["BG_MID"])
+        self.tree.tag_configure("even",    background=T["BG_EVEN"])
+        self.tree.tag_configure("checked", background=T["BG_CHECKED"])
+
+    def _toggle_theme(self):
+        T.clear()
+        if ctk.get_appearance_mode().lower() == "dark":
+            T.update(LIGHT_THEME)
+            ctk.set_appearance_mode("light")
+            self.theme_btn.configure(text="🌙  Switch to Dark Theme")
+            save_config({"theme": "light"})
+        else:
+            T.update(DARK_THEME)
+            ctk.set_appearance_mode("dark")
+            self.theme_btn.configure(text="☀  Switch to Light Theme")
+            save_config({"theme": "dark"})
+
+        self._apply_treeview_style()
+        self._refresh_tree_tags()
+        # Re-apply tags to existing rows
+        for iid in self.tree.get_children():
+            if iid in self._checked:
+                self.tree.item(iid, tags=("checked",))
+            else:
+                idx = self.tree.index(iid)
+                self.tree.item(iid, tags=("odd" if (idx + 1) % 2 else "even",))
+
+        # Update all plain tk.Frame backgrounds
+        for frame, key in [
+            (self._right_host, "BG_DARK"),
+            (self._tbl_host,   "BG_DARK"),
+            (self._log_host,   "BG_DARK"),
+        ]:
+            try: frame.configure(bg=T[key])
+            except Exception: pass
+
+        # Update paned window sash color
+        try:
+            self._tree_style.configure("Dark.TPanedwindow", background=T["BG_DARK"])
+        except Exception:
+            pass
+
+        # Update log box colors
+        try:
+            self._log_box.configure(fg_color=T["BG_LOG"], text_color=T["FG"])
+        except Exception:
+            pass
+
+        # Update tree host (the CTkFrame wrapping the treeview)
+        try:
+            self._tree_host.configure(fg_color=T["BG_MID"])
+        except Exception:
+            pass
+
+        # Redraw vertical lines with new color
+        try:
+            for f in self._sep_frames:
+                f.configure(bg=T["LINE_COL"])
+            self._draw_vlines()
+        except Exception:
+            pass
+
+        # Update context menu colors
+        try:
+            self._ctx.configure(bg=T["BG_MID"], fg=T["FG"],
+                                 activebackground=T["SEL_BG"])
+        except Exception:
+            pass
+
+    # ── Row height ─────────────────────────────────────────────────────────────
+
+    def _on_row_height_change(self, value):
+        h = int(float(value))
+        self._rh_lbl.configure(text=f"{h} px")
+        self._apply_treeview_style()
+        # Force the treeview to redraw at the new row height
+        self.tree.update_idletasks()
+        try:
+            self._draw_vlines()
+        except Exception:
+            pass
+
+    # ── Select all / deselect all ──────────────────────────────────────────────
+
+    def _toggle_all_checks(self):
+        all_iids = self.tree.get_children()
+        if not all_iids:
+            return
+        # If all are checked → deselect all, otherwise select all
+        if all(iid in self._checked for iid in all_iids):
+            for iid in all_iids:
+                self._checked.discard(iid)
+        else:
+            for iid in all_iids:
+                self._checked.add(iid)
+        for iid in all_iids:
+            self._refresh_row_display(iid)
+        self._update_export_label()
+
+    # ── Sort ───────────────────────────────────────────────────────────────────
 
     def _sort_by(self, col_id):
         if self._sort_col == col_id:
@@ -803,16 +1126,16 @@ class App(ctk.CTk):
             self._sort_col = col_id
             self._sort_rev = False
 
-        # Update heading arrows
+        # Update heading arrows (skip Check column)
         for c_id, c_label, _, _ in COLUMNS:
+            if c_id == "Check":
+                continue
             arrow = ""
             if c_id == self._sort_col:
                 arrow = "  ▲" if not self._sort_rev else "  ▼"
             self.tree.heading(c_id, text=c_label + arrow)
 
-        # Sort results list by the column
         key_map = {
-            "Check":         lambda r: 1 if r.get("_iid") in self._checked else 0,
             "Repo":          lambda r: r["repo"].lower(),
             "Issue URL":     lambda r: r["issue_url"],
             "Title":         lambda r: r["issue_title"].lower(),
@@ -835,7 +1158,12 @@ class App(ctk.CTk):
             r["_iid"] = new_iid
 
     def _row_values(self, r, iid=None):
-        check = "☑" if iid and iid in self._checked else "☐"
+        check     = "☑" if iid and iid in self._checked else "☐"
+        file_list = r.get("changed_file_list", [])
+        count     = r.get("changed_files", len(file_list))
+        lines     = r.get("changed_lines", 0)
+        names     = ", ".join(os.path.basename(f) for f in file_list) if file_list else "—"
+        files_cell = f"{count} files | {lines} lines | {names}"
         return (
             check,
             r["repo"],
@@ -844,7 +1172,7 @@ class App(ctk.CTk):
             r["base_sha"],
             r["language"],
             r["pr_url"],
-            r.get("changed_files", 0),
+            files_cell,
         )
 
     def _refresh_row_display(self, iid):
@@ -868,6 +1196,80 @@ class App(ctk.CTk):
                 text=f"  Export {n} Ticked Row{'s' if n != 1 else ''} to Excel")
         else:
             self.export_btn.configure(text="  Export to Excel")
+
+    def _show_cell_editor(self, iid, col_id):
+        """Open a floating, selectable Text editor over the clicked cell."""
+        if self._cell_editor:
+            try:
+                self._cell_editor.destroy()
+            except Exception:
+                pass
+            self._cell_editor = None
+
+        bbox = self.tree.bbox(iid, col_id)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        # Fetch cell value
+        col_ids_list = [c[0] for c in COLUMNS]
+        if col_id not in col_ids_list:
+            return
+        idx  = col_ids_list.index(col_id)
+        vals = self.tree.item(iid, "values")
+        text = str(vals[idx]) if idx < len(vals) else ""
+
+        # Count lines to determine editor height
+        lines     = text.split("\n")
+        line_h    = 18
+        ed_height = max(h, min(len(lines) * line_h + 8, 300))
+        ed_width  = max(w, 260)
+
+        editor = tk.Text(
+            self.tree,
+            width=1, height=1,
+            font=FONT_MONO,
+            bg=T["BG_MID"], fg=T["FG"],
+            insertbackground=T["FG"],
+            selectbackground=T["SEL_BG"], selectforeground="white",
+            relief="solid", borderwidth=1,
+            wrap="none",
+        )
+        editor.place(x=x, y=y, width=ed_width, height=ed_height)
+        editor.insert("1.0", text)
+        editor.focus_set()
+        editor.tag_add("sel", "1.0", "end")
+
+        def _close(event=None):
+            # Save edited value back to treeview
+            new_val = editor.get("1.0", "end-1c")
+            vals_list = list(self.tree.item(iid, "values"))
+            if idx < len(vals_list):
+                vals_list[idx] = new_val
+                self.tree.item(iid, values=tuple(vals_list))
+                # Also sync back to results
+                tree_idx = self.tree.index(iid)
+                if 0 <= tree_idx < len(self.results):
+                    result = self.results[tree_idx]
+                    field_map = {
+                        "Repo":          "repo",
+                        "Title":         "issue_title",
+                        "Issue URL":     "issue_url",
+                        "Base SHA":      "base_sha",
+                        "Category":      "language",
+                        "PR URL":        "pr_url",
+                    }
+                    if col_id in field_map:
+                        result[field_map[col_id]] = new_val
+            try:
+                editor.destroy()
+            except Exception:
+                pass
+            self._cell_editor = None
+
+        editor.bind("<Escape>", _close)
+        editor.bind("<FocusOut>", _close)
+        self._cell_editor = editor
 
     # ── Log helpers ────────────────────────────────────────────────────────────
 

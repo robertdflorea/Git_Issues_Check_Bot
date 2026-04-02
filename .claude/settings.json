@@ -7,7 +7,21 @@
       "Bash(rm -rf build dist issue_finder.spec)",
       "Bash(C:/Users/PIStar/AppData/Roaming/Python/Python314/Scripts/pyinstaller.exe --onefile --windowed --name issue_finder main.py)",
       "Bash(python -c \"import main; print\\(''OK''\\)\")",
-      "Bash(python -c \"import main; print\\(''''OK''''\\)\")"
+      "Bash(python -c \"import main; print\\(''''OK''''\\)\")",
+      "Bash(pyinstaller --onefile --windowed --name issue_finder main.py)",
+      "Bash(python -m PyInstaller --onefile --windowed --name issue_finder main.py)",
+      "Bash(cmd /c \"taskkill /F /IM issue_finder.exe\")",
+      "Bash(cmd /c \"taskkill /F /IM issue_finder.exe 2>&1\")",
+      "Bash(cmd /c \"del /F \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\" 2>&1\")",
+      "Bash(cmd /c \"wmic process where name=''issue_finder.exe'' get ProcessId 2>&1\")",
+      "Bash(cmd /c \"handle64.exe \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\" 2>&1 || handle \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\" 2>&1 || echo not found\")",
+      "Bash(cmd /c \"move /Y \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\" \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder_old.exe\"\" 2>&1\")",
+      "Bash(cmd /c \"dir \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\\"\" 2>&1\")",
+      "Bash(python -m PyInstaller --onefile --windowed --name issue_finder --distpath dist2 main.py)",
+      "Bash(cmd /c \"move /Y \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist2\\\\issue_finder.exe\"\" \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\" 2>&1\")",
+      "Bash(cmd /c \"move /Y \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist2\\\\issue_finder.exe\"\" \"\"E:\\\\AI BOT\\\\git_issue_check\\\\dist\\\\issue_finder.exe\"\"\")",
+      "Bash(pyinstaller issue_finder.spec)",
+      "Bash(python -m PyInstaller issue_finder.spec)"
     ]
   }
 }
