@@ -385,15 +385,22 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
                 issue_ok = has_non_test_code
 
         if issue_ok:
-            CODE_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx"}
+            CODE_EXTS        = {".py", ".js", ".ts", ".tsx", ".jsx"}
+            EXCLUDE_PATTERNS = (
+                ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+                ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+                ".min.js",  ".min.ts",
+                "_test.py", "_spec.py",
+            )
             code_lines = sum(
                 lines for fname, lines in lines_per_file.items()
                 if os.path.splitext(fname)[1].lower() in CODE_EXTS
+                and not any(fname.lower().endswith(p) for p in EXCLUDE_PATTERNS)
             )
-            lines_ok = 30 <= code_lines <= 200
+            lines_ok = 30 <= code_lines <= 300
             issue_checks.append((
-                f"Code file lines changed 30–200 (found {code_lines})", lines_ok))
-            log_cb("check", (f"Code file lines changed 30–200 (found {code_lines})", lines_ok))
+                f"Code file lines changed 30–300 (found {code_lines})", lines_ok))
+            log_cb("check", (f"Code file lines changed 30–300 (found {code_lines})", lines_ok))
             issue_ok = lines_ok
     else:
         # still record the PR check as skipped / not checked
@@ -416,6 +423,11 @@ def _validate_issue_obj(headers, repo_full, issue, repo, contents,
             "changed_lines":      sum(
                 l for f, l in lines_per_file.items()
                 if os.path.splitext(f)[1].lower() in {".py", ".js", ".ts", ".tsx", ".jsx"}
+                and not any(f.lower().endswith(p) for p in (
+                    ".spec.js", ".spec.jsx", ".spec.ts", ".spec.tsx",
+                    ".test.js", ".test.jsx", ".test.ts", ".test.tsx",
+                    ".min.js", ".min.ts", "_test.py", "_spec.py",
+                ))
             ),
             "dockerfile":         contents.get("dockerfile", False),
             "checks":        issue_checks,
